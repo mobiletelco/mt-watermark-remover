@@ -18,13 +18,14 @@ input[type=file]{display:none}
 <p class="n">Runs fully in your browser. Nothing is uploaded. Paint over the watermark, tap Remove, then Download.</p></header>
 <div class="bar">
 <label class="b">Choose image<input id="f" type="file" accept="image/*"></label>
-<span>Brush <input id="sz" type="range" min="3" max="60" value="14"></span>
+<span>Brush <input id="sz" type="range" min="3" max="60" value="10"></span><span>Edge grow <input id="gr" type="range" min="0" max="8" value="3"></span>
+<button id="pk" class="g" disabled>Pick mark colour</button><span id="pc">tolerance <input id="tl" type="range" min="10" max="120" value="45"> <button id="pcx" class="g">Off</button></span>
 <button id="rm" disabled>Remove</button>
 <button id="un" class="g" disabled>Undo</button>
 <button id="cl" class="g" disabled>Clear mask</button>
 <button id="dl" disabled>Download</button>
 </div>
-<p class="n" id="st" style="padding:0 14px"></p>
+<p class="n" id="st" style="padding:0 14px;min-height:5.2em"></p>
 <div id="wrap"><canvas id="c"></canvas><canvas id="mask"></canvas></div>
 <p class="n" style="padding:0 14px 20px">Limits: it uses a small free AI inpainting model (MI-GAN, MIT licence) that runs on your device. It works well for thin text or logos over smooth or plain areas. Where a watermark covers detailed parts such as faces, text or product details, those pixels are guessed and will not match the original. Use only on images you own or may edit.</p>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js"></script>
@@ -35,11 +36,19 @@ const $=id=>document.getElementById(id);let hist=[],drawing=false,last=null;
 $('f').onchange=e=>{const f=e.target.files[0];if(!f)return;const im=new Image();
  im.onload=()=>{c.width=m.width=im.naturalWidth;c.height=m.height=im.naturalHeight;
   cx.drawImage(im,0,0);mx.clearRect(0,0,m.width,m.height);hist=[];
-  ['rm','cl','dl'].forEach(i=>$(i).disabled=false);$('un').disabled=true};im.src=URL.createObjectURL(f)};
+  ['rm','cl','dl','pk'].forEach(i=>$(i).disabled=false);$('un').disabled=true};im.src=URL.createObjectURL(f)};
 function pos(e){const r=m.getBoundingClientRect();return[(e.clientX-r.left)*m.width/r.width,(e.clientY-r.top)*m.height/r.height]}
 function stroke(a,b){mx.strokeStyle='#f00';mx.fillStyle='#f00';mx.lineCap='round';mx.lineWidth=$('sz').value*m.width/Math.max(400,m.getBoundingClientRect().width);
  mx.beginPath();mx.moveTo(a[0],a[1]);mx.lineTo(b[0],b[1]);mx.stroke()}
-m.onpointerdown=e=>{drawing=true;m.setPointerCapture(e.pointerId);last=pos(e);stroke(last,last)};
+let pick=null,picking=false;
+$('pk').onclick=()=>{picking=true;$('st').textContent='Tap one letter of the watermark.'};
+$('pcx').onclick=()=>{pick=null;$('st').textContent='Colour filter off.'};
+m.onpointerdown=e=>{if(picking){const p=pos(e);const R=5,px=Math.round(p[0]),py=Math.round(p[1]),x0=Math.max(0,px-R),y0=Math.max(0,py-R),w=Math.min(c.width,px+R+1)-x0,h=Math.min(c.height,py+R+1)-y0,d=cx.getImageData(x0,y0,w,h).data,n=w*h;
+ // the tapped letter is thin, so take the pixel in a small window that differs most from the window's median (the background)
+ const med=[0,1,2].map(k=>{const a=[];for(let i=0;i<n;i++)a.push(d[i*4+k]);a.sort((u,v)=>u-v);return a[n>>1]});
+ let best=0,bi=0;for(let i=0;i<n;i++){const e=Math.hypot(d[i*4]-med[0],d[i*4+1]-med[1],d[i*4+2]-med[2]);if(e>best){best=e;bi=i}}
+ pick=[d[bi*4],d[bi*4+1],d[bi*4+2]];picking=false;$('st').textContent='Colour filter on: only painted pixels close to rgb('+pick+') are replaced. Paint, then Remove.';return}
+ drawing=true;m.setPointerCapture(e.pointerId);last=pos(e);stroke(last,last)};
 m.onpointermove=e=>{if(!drawing)return;const p=pos(e);stroke(last,p);last=p};
 m.onpointerup=()=>drawing=false;
 $('cl').onclick=()=>mx.clearRect(0,0,m.width,m.height);
@@ -56,8 +65,18 @@ async function getSess(st){if(sess)return sess;st.textContent='Loading model (28
 async function run(st){
  const W=c.width,H=c.height,mk=mx.getImageData(0,0,W,H).data;
  let x0=W,y0=H,x1=-1,y1=-1;const hole=new Uint8Array(W*H);
- for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(mk[(y*W+x)*4+3]>60){hole[y*W+x]=1;if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}
- if(x1<0){st.textContent='Paint over the watermark first.';return}
+ const base=cx.getImageData(0,0,W,H).data,tol=+$('tl').value;
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(mk[(y*W+x)*4+3]>60){
+  if(pick){const q=(y*W+x)*4,dr=base[q]-pick[0],dg=base[q+1]-pick[1],db=base[q+2]-pick[2];if(Math.sqrt(dr*dr+dg*dg+db*db)>tol)continue}
+  hole[y*W+x]=1;if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}
+ if(x1<0){st.textContent='Nothing to remove: no painted pixels match the picked colour (try a higher tolerance) or nothing was painted.';return}
+ // grow the painted area a little so anti-aliased halos of the mark are included (no ghost edges)
+ const G=+$('gr').value;if(G>0){const h2=new Uint8Array(W*H);
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){if(!hole[y*W+x])continue;
+   for(let dy=-G;dy<=G;dy++){const Y=y+dy;if(Y<0||Y>=H)continue;for(let dx=-G;dx<=G;dx++){const X=x+dx;if(X>=0&&X<W)h2[Y*W+X]=1}}}
+  hole.set(h2);x0=Math.max(0,x0-G);y0=Math.max(0,y0-G);x1=Math.min(W-1,x1+G);y1=Math.min(H-1,y1+G)}
+ const hc=document.createElement('canvas');hc.width=W;hc.height=H;const hx=hc.getContext('2d'),hd=hx.createImageData(W,H);
+ for(let i=0;i<W*H;i++)if(hole[i]){hd.data[i*4+3]=255}hx.putImageData(hd,0,0);
  const S=await getSess(st);st.textContent='Removing...';await new Promise(r=>setTimeout(r,30));
  hist.push(cx.getImageData(0,0,W,H));$('un').disabled=false;
  const bw=x1-x0+1,bh=y1-y0+1,fits=bw<=480&&bh<=480;
@@ -68,7 +87,7 @@ async function run(st){
  const t=document.createElement('canvas');t.width=t.height=512;const tx=t.getContext('2d');
  tx.drawImage(c,wx,wy,ww,wh,0,0,512,512);const src=tx.getImageData(0,0,512,512).data;
  const tm=document.createElement('canvas');tm.width=tm.height=512;const tmx=tm.getContext('2d');
- tmx.drawImage(m,wx,wy,ww,wh,0,0,512,512);const msrc=tmx.getImageData(0,0,512,512).data;
+ tmx.drawImage(hc,wx,wy,ww,wh,0,0,512,512);const msrc=tmx.getImageData(0,0,512,512).data;
  const img=new Uint8Array(3*512*512),msk=new Uint8Array(512*512);
  for(let i=0;i<512*512;i++){img[i]=src[i*4];img[512*512+i]=src[i*4+1];img[2*512*512+i]=src[i*4+2];msk[i]=msrc[i*4+3]>60?0:255}
  const out=(await S.run({image:new ort.Tensor('uint8',img,[1,3,512,512]),mask:new ort.Tensor('uint8',msk,[1,1,512,512])})).result.data;
